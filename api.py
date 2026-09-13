@@ -2,7 +2,7 @@ import os
 import re
 import logging
 from functools import wraps
-import requests
+from curl_cffi import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
@@ -17,14 +17,8 @@ COOKIE = os.environ.get("SHOPEE_COOKIE", "")
 API_KEY = os.environ.get("API_KEY", "salevn_2026_secret_key_v2")
 PORT = int(os.environ.get("PORT", 5000))
 
-# 🌐 PROXY: Nếu muốn dùng, bỏ comment dòng dưới. Nếu proxy chết, hãy comment lại để chạy trực tiếp.
-# PROXY_URL = "http://171.248.211.97:10226" # Hoặc socks5h://...
-# proxies = {"http": PROXY_URL, "https": PROXY_URL} if 'PROXY_URL' in os.environ else {}
-proxies = {} # Mặc định TẮT proxy để test xem code có chạy không trước
-
-# Session với timeout chặt chẽ (10 giây) để không bị treo HTTP 0
-session = requests.Session()
-session.proxies.update(proxies)
+# Giả lập Chrome 120 để qua mặt WAF của Shopee
+session = requests.Session(impersonate="chrome120")
 
 # ==================== HELPERS ====================
 def clean_cookie(raw):
@@ -33,7 +27,7 @@ def clean_cookie(raw):
 def resolve_url(url):
     try:
         if not url.startswith("http"): url = "https://" + url
-        r = session.get(url, timeout=10, allow_redirects=True)
+        r = session.get(url, timeout=15, allow_redirects=True)
         return r.url
     except Exception as e:
         logger.warning(f"resolve_url failed: {e}")
@@ -56,11 +50,11 @@ def require_api_key(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if request.headers.get('x-api-key') != API_KEY:
-            return jsonify({"error": "Unauthorized"}), 401
+            return jsonify({"success": False, "error": "Unauthorized"}), 401
         return f(*args, **kwargs)
     return decorated
 
-# ==================== API PRODUCT INFO (CHUẨN THEO JSON BẠN GỬI) ====================
+# ==================== API PRODUCT INFO ====================
 @app.route("/api/product-info", methods=["GET"])
 @require_api_key
 def product_info():
@@ -81,7 +75,7 @@ def product_info():
 
     api_url = f"https://affiliate.shopee.vn/api/v3/offer/product?item_id={item_id}"
     
-    # 🛡️ HEADERS NGỤY TRANG TỐI ĐA (Giống hệt Chrome thật)
+    # Headers chuẩn trình duyệt để không bị chặn
     headers = {
         "accept": "application/json",
         "accept-language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
@@ -98,13 +92,8 @@ def product_info():
     }
 
     try:
-        # Timeout 12s: Nếu quá 12s không phản hồi -> Báo lỗi ngay, không treo server
-        r = session.get(api_url, headers=headers, timeout=12)
-        
-        try:
-            d = r.json()
-        except Exception:
-            return jsonify({"success": False, "error": "Shopee returned HTML (Blocked)", "raw": r.text[:200]}), 502
+        r = session.get(api_url, headers=headers, timeout=15)
+        d = r.json()
 
         if d.get("code") != 0:
             err_code = d.get("detail", {}).get("error", "Unknown")
@@ -115,7 +104,7 @@ def product_info():
         comm_rate_detail = data.get("commission_rate_detail", {})
         comm_rate = data.get("commission_rate", {})
 
-        # ✅ PARSE DỮ LIỆU CHÍNH XÁC 100% THEO FILE JSON BẠN CUNG CẤP
+        # Parse chính xác theo cấu trúc JSON bạn đã cung cấp
         result = {
             "success": True,
             "item_id": product.get("itemid", item_id),
@@ -138,8 +127,8 @@ def product_info():
         }
         return jsonify(result)
 
-    except requests.exceptions.Timeout:
-        return jsonify({"success": False, "error": "Request timed out. Proxy might be dead or Shopee is blocking."}), 504
+    except requests.RequestsError as e:
+        return jsonify({"success": False, "error": f"Request failed: {str(e)}"}), 504
     except Exception as e:
         logger.error(f"Product info error: {e}")
         return jsonify({"success": False, "error": "Internal error", "detail": str(e)}), 500
