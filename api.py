@@ -6,7 +6,8 @@ import traceback
 from datetime import datetime
 from functools import wraps
 
-import requests
+# ✅ SỬ DỤNG curl_cffi THAY VÌ requests ĐỂ GIẢ LẬP TLS FINGERPRINT
+from curl_cffi import requests as curl_requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
@@ -22,10 +23,8 @@ COOKIE = os.environ.get("SHOPEE_COOKIE", "")
 PORT = int(os.environ.get("PORT", 5000))
 API_KEY = os.environ.get("API_KEY", "your_secret_api_key_here")
 
-session = requests.Session()
-session.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-})
+# ✅ KHỞI TẠO SESSION GIẢ LẬP CHROME 120
+session = curl_requests.Session(impersonate="chrome120")
 
 # ==================== HELPERS ====================
 def clean_cookie(raw):
@@ -44,11 +43,9 @@ def resolve_url(url):
 
 def extract_ids(url):
     """Trích xuất shopid và itemid từ URL Shopee"""
-    # Định dạng: shopee.vn/product/{shopid}/{itemid}
     m = re.search(r"/(\d+)/(\d+)(?:\?|$|&)", url)
     if m:
         return m.group(1), m.group(2)
-    # Định dạng khác có thể gặp
     m = re.search(r"[?&]item_id=(\d+)", url)
     if m:
         return None, m.group(1)
@@ -87,12 +84,14 @@ def convert():
     sub_id = str(data.get("sub_id", "")).strip()
 
     if not url:
-        return jsonify({"error": "Missing url"}), 400
+        return jsonify({"success": False, "error": "Missing url"}), 400
 
-    # 1. Resolve short link
+    cookie = clean_cookie(COOKIE)
+    if not cookie:
+        return jsonify({"success": False, "error": "Server chưa được cấu hình SHOPEE_COOKIE"}), 500
+
     resolved_url = resolve_url(url)
     
-    # 2. Build payload
     lp = [{"originalLink": resolved_url}]
     if sub_id:
         lp[0]["advancedLinkParams"] = {"subId1": str(sub_id)}
@@ -105,8 +104,9 @@ def convert():
     
     headers = {
         "content-type": "application/json",
-        "cookie": clean_cookie(COOKIE),
-        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        "cookie": cookie,
+        "referer": "https://affiliate.shopee.vn/",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
     try:
@@ -115,7 +115,7 @@ def convert():
         
         batch = d.get("data", {}).get("batchCustomLink", [])
         if not batch or batch[0].get("failCode") != 0:
-            return jsonify({"error": "Convert failed", "detail": d}), 500
+            return jsonify({"success": False, "error": "Convert failed", "detail": d}), 500
             
         return jsonify({
             "success": True,
@@ -124,11 +124,9 @@ def convert():
         })
     except Exception as e:
         logger.error(f"Convert error: {e}")
-        return jsonify({"error": "Internal server error"}), 500
+        return jsonify({"success": False, "error": "Internal server error"}), 500
 
-# ==================== 2. API PRODUCT INFO (MỚI) ====================
-# ==================== 2. API PRODUCT INFO (ĐÃ TỐI ƯU LỖI) ====================
-# ==================== 2. API PRODUCT INFO (ĐÃ CẬP NHẬT HEADERS CHỐNG BLOCK) ====================
+# ==================== 2. API PRODUCT INFO (ĐÃ CHỐNG BLOCK) ====================
 @app.route("/api/product-info", methods=["GET"])
 @require_api_key
 def product_info():
@@ -138,10 +136,7 @@ def product_info():
 
     cookie = clean_cookie(COOKIE)
     if not cookie:
-        return jsonify({
-            "success": False, 
-            "error": "Server chưa được cấu hình SHOPEE_COOKIE."
-        }), 500
+        return jsonify({"success": False, "error": "Server chưa được cấu hình SHOPEE_COOKIE."}), 500
 
     try:
         resolved_url = resolve_url(url)
@@ -150,28 +145,24 @@ def product_info():
         return jsonify({"success": False, "error": f"Lỗi xử lý URL: {str(e)}"}), 400
     
     if not item_id:
-        return jsonify({
-            "success": False, 
-            "error": f"Không thể trích xuất item_id. Link: {resolved_url}"
-        }), 400
+        return jsonify({"success": False, "error": f"Không thể trích xuất item_id. Link: {resolved_url}"}), 400
 
     api_url = f"https://affiliate.shopee.vn/api/v3/offer/product?item_id={item_id}"
     
-    # 🛡️ BỘ HEADERS "NGỤY TRANG" GIỐNG HỆT TRÌNH DUYỆT (Lấy cảm hứng từ repo TypeScript)
+    # 🛡️ BỘ HEADERS "NGỤY TRANG" GIỐNG HỆT TRÌNH DUYỆT
     headers = {
         "accept": "*/*",
         "accept-language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
         "content-type": "application/json",
         "cookie": cookie,
-        "referer": "https://affiliate.shopee.vn/", # 👈 CỰC KỲ QUAN TRỌNG
-        "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+        "referer": "https://affiliate.shopee.vn/", 
+        "sec-ch-ua": '"Google Chrome";v="120", "Chromium";v="120", "Not_A Brand";v="24"',
         "sec-ch-ua-mobile": "?0",
         "sec-ch-ua-platform": '"Windows"',
         "sec-fetch-dest": "empty",
         "sec-fetch-mode": "cors",
         "sec-fetch-site": "same-origin",
-        # ⚠️ LƯU Ý: User-Agent này PHẢI KHỚP với trình duyệt bạn dùng để lấy Cookie
-        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
     try:
@@ -187,11 +178,10 @@ def product_info():
             }), 502
 
         if d.get("code") != 0:
-            # Bắt đúng lỗi 90309999 để thông báo rõ ràng cho người dùng
             if d.get("detail", {}).get("error") == 90309999:
                 return jsonify({
                     "success": False, 
-                    "error": "Shopee chặn yêu cầu (Lỗi 90309999). Cookie có thể đã hết hạn hoặc User-Agent không khớp với trình duyệt lấy cookie."
+                    "error": "Shopee chặn yêu cầu (Lỗi 90309999). Cookie có thể đã hết hạn."
                 }), 403
                 
             return jsonify({
@@ -229,7 +219,7 @@ def product_info():
         }
         return jsonify(result)
 
-    except requests.exceptions.RequestException as e:
+    except curl_requests.RequestException as e:
         return jsonify({"success": False, "error": f"Lỗi kết nối đến Shopee: {str(e)}"}), 504
     except Exception as e:
         logger.error(f"Product info unhandled error: {e}")
@@ -241,7 +231,7 @@ def product_info():
 def orders():
     sub_id = request.args.get("sub_id")
     if not sub_id:
-        return jsonify({"error": "Missing sub_id"}), 400
+        return jsonify({"success": False, "error": "Missing sub_id"}), 400
 
     start_ts = request.args.get("start", int(time.time()) - 7 * 24 * 3600)
     end_ts = request.args.get("end", int(time.time()))
@@ -250,10 +240,12 @@ def orders():
 
     qs = f"page_size={page_size}&page_num={page_num}&sub_id={sub_id}&purchase_time_s={start_ts}&purchase_time_e={end_ts}&version=1"
     
+    cookie = clean_cookie(COOKIE)
     headers = {
         "content-type": "application/json",
-        "cookie": clean_cookie(COOKIE),
-        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        "cookie": cookie,
+        "referer": "https://affiliate.shopee.vn/",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
     try:
@@ -261,7 +253,7 @@ def orders():
         d = r.json()
         
         if d.get("code") != 0:
-            return jsonify({"error": "Shopee report error", "detail": d}), 500
+            return jsonify({"success": False, "error": "Shopee report error", "detail": d}), 500
 
         data = d.get("data", {})
         checkout_list = data.get("list", [])
@@ -272,7 +264,6 @@ def orders():
             
             for order in (checkout.get("orders") or []):
                 order_sn = order.get("order_sn", "")
-                # Xác định trạng thái
                 if order.get("order_status") == "CANCEL" or checkout.get("conversion_status") == 3:
                     status = "cancelled"
                 elif order.get("order_status") == "COMPLETED" or checkout.get("conversion_status") == 2:
@@ -281,7 +272,6 @@ def orders():
                     status = "pending"
 
                 for item in (order.get("items") or []):
-                    # Lưu ý: Giá trị commission của Shopee trả về trong report cần chia 100000
                     comm_raw = item.get("estimated_commission", 0) or item.get("actual_commission", 0) or 0
                     try:
                         comm_vnd = int(float(str(comm_raw))) / 100000
@@ -307,13 +297,19 @@ def orders():
         })
     except Exception as e:
         logger.error(f"Orders exception: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"success": False, "error": str(e)}), 500
 
 # ==================== HEALTH CHECK ====================
 @app.route("/", methods=["GET"])
 def health():
     return jsonify({"status": "OK", "service": "Shopee Aff Proxy API", "cookie_active": bool(COOKIE)})
 
+@app.route("/api/health", methods=["GET"])
+def api_health():
+    return health()
+
+# ==================== MAIN ====================
 if __name__ == "__main__":
     logger.info(f"🚀 Starting API on 0.0.0.0:{PORT}")
+    logger.info(f"🔑 Shopee Cookie configured: {bool(COOKIE)}")
     app.run(host="0.0.0.0", port=PORT, debug=False, threaded=True)
