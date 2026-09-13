@@ -128,6 +128,7 @@ def convert():
 
 # ==================== 2. API PRODUCT INFO (MỚI) ====================
 # ==================== 2. API PRODUCT INFO (ĐÃ TỐI ƯU LỖI) ====================
+# ==================== 2. API PRODUCT INFO (ĐÃ CẬP NHẬT HEADERS CHỐNG BLOCK) ====================
 @app.route("/api/product-info", methods=["GET"])
 @require_api_key
 def product_info():
@@ -135,15 +136,13 @@ def product_info():
     if not url:
         return jsonify({"success": False, "error": "Missing url parameter"}), 400
 
-    # 1. Kiểm tra Cookie trước khi làm gì cả
     cookie = clean_cookie(COOKIE)
     if not cookie:
         return jsonify({
             "success": False, 
-            "error": "Server chưa được cấu hình SHOPEE_COOKIE. Vui lòng kiểm tra Environment Variables trên Render."
+            "error": "Server chưa được cấu hình SHOPEE_COOKIE."
         }), 500
 
-    # 2. Resolve và lấy item_id
     try:
         resolved_url = resolve_url(url)
         shop_id, item_id = extract_ids(resolved_url)
@@ -153,30 +152,48 @@ def product_info():
     if not item_id:
         return jsonify({
             "success": False, 
-            "error": f"Không thể trích xuất item_id từ link. Link đã resolve thành: {resolved_url}"
+            "error": f"Không thể trích xuất item_id. Link: {resolved_url}"
         }), 400
 
-    # 3. Gọi API offer/product của Shopee
     api_url = f"https://affiliate.shopee.vn/api/v3/offer/product?item_id={item_id}"
+    
+    # 🛡️ BỘ HEADERS "NGỤY TRANG" GIỐNG HỆT TRÌNH DUYỆT (Lấy cảm hứng từ repo TypeScript)
     headers = {
+        "accept": "*/*",
+        "accept-language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+        "content-type": "application/json",
         "cookie": cookie,
-        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        "referer": "https://affiliate.shopee.vn/", # 👈 CỰC KỲ QUAN TRỌNG
+        "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-origin",
+        # ⚠️ LƯU Ý: User-Agent này PHẢI KHỚP với trình duyệt bạn dùng để lấy Cookie
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     }
 
     try:
         r = session.get(api_url, headers=headers, timeout=15)
         
-        # Bắt lỗi nếu Shopee trả về HTML (Captcha/Block) thay vì JSON
         try:
             d = r.json()
         except Exception:
             return jsonify({
                 "success": False, 
-                "error": "Shopee trả về dữ liệu không phải JSON (Có thể Cookie đã hết hạn hoặc bị chặn).",
+                "error": "Shopee trả về HTML (Bị chặn/Captcha). Hãy kiểm tra lại Cookie.",
                 "raw_response": r.text[:200]
             }), 502
 
         if d.get("code") != 0:
+            # Bắt đúng lỗi 90309999 để thông báo rõ ràng cho người dùng
+            if d.get("detail", {}).get("error") == 90309999:
+                return jsonify({
+                    "success": False, 
+                    "error": "Shopee chặn yêu cầu (Lỗi 90309999). Cookie có thể đã hết hạn hoặc User-Agent không khớp với trình duyệt lấy cookie."
+                }), 403
+                
             return jsonify({
                 "success": False, 
                 "error": f"Shopee API error: {d.get('msg', 'Unknown')}",
@@ -188,7 +205,6 @@ def product_info():
         comm_rate = data.get("commission_rate_detail", {})
         comm_val = data.get("commission_rate", {})
 
-        # 4. Trích xuất dữ liệu an toàn (dùng .get để tránh KeyError)
         result = {
             "success": True,
             "item_id": item_id,
