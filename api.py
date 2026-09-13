@@ -127,39 +127,68 @@ def convert():
         return jsonify({"error": "Internal server error"}), 500
 
 # ==================== 2. API PRODUCT INFO (MỚI) ====================
+# ==================== 2. API PRODUCT INFO (ĐÃ TỐI ƯU LỖI) ====================
 @app.route("/api/product-info", methods=["GET"])
 @require_api_key
 def product_info():
     url = request.args.get("url", "")
     if not url:
-        return jsonify({"error": "Missing url parameter"}), 400
+        return jsonify({"success": False, "error": "Missing url parameter"}), 400
 
-    # 1. Resolve và lấy item_id
-    resolved_url = resolve_url(url)
-    shop_id, item_id = extract_ids(resolved_url)
+    # 1. Kiểm tra Cookie trước khi làm gì cả
+    cookie = clean_cookie(COOKIE)
+    if not cookie:
+        return jsonify({
+            "success": False, 
+            "error": "Server chưa được cấu hình SHOPEE_COOKIE. Vui lòng kiểm tra Environment Variables trên Render."
+        }), 500
+
+    # 2. Resolve và lấy item_id
+    try:
+        resolved_url = resolve_url(url)
+        shop_id, item_id = extract_ids(resolved_url)
+    except Exception as e:
+        return jsonify({"success": False, "error": f"Lỗi xử lý URL: {str(e)}"}), 400
     
     if not item_id:
-        return jsonify({"error": "Cannot extract item_id from URL", "resolved_url": resolved_url}), 400
+        return jsonify({
+            "success": False, 
+            "error": f"Không thể trích xuất item_id từ link. Link đã resolve thành: {resolved_url}"
+        }), 400
 
-    # 2. Gọi API offer/product của Shopee
+    # 3. Gọi API offer/product của Shopee
     api_url = f"https://affiliate.shopee.vn/api/v3/offer/product?item_id={item_id}"
     headers = {
-        "cookie": clean_cookie(COOKIE),
+        "cookie": cookie,
         "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
 
     try:
         r = session.get(api_url, headers=headers, timeout=15)
-        d = r.json()
+        
+        # Bắt lỗi nếu Shopee trả về HTML (Captcha/Block) thay vì JSON
+        try:
+            d = r.json()
+        except Exception:
+            return jsonify({
+                "success": False, 
+                "error": "Shopee trả về dữ liệu không phải JSON (Có thể Cookie đã hết hạn hoặc bị chặn).",
+                "raw_response": r.text[:200]
+            }), 502
 
         if d.get("code") != 0:
-            return jsonify({"error": "Shopee API error", "detail": d.get("msg")}), 500
+            return jsonify({
+                "success": False, 
+                "error": f"Shopee API error: {d.get('msg', 'Unknown')}",
+                "detail": d
+            }), 400
 
         data = d.get("data", {})
         product = data.get("batch_item_for_item_card_full", {})
         comm_rate = data.get("commission_rate_detail", {})
+        comm_val = data.get("commission_rate", {})
 
-        # 3. Trích xuất dữ liệu theo yêu cầu
+        # 4. Trích xuất dữ liệu an toàn (dùng .get để tránh KeyError)
         result = {
             "success": True,
             "item_id": item_id,
@@ -172,10 +201,10 @@ def product_info():
                 "seller_rate": format_rate(comm_rate.get("seller_commission_rate", 0)),
                 "shopee_rate": format_rate(comm_rate.get("shopee_commission_rate", 0)),
                 "default_rate": format_rate(comm_rate.get("default_commission_rate", 0)),
-                "seller_amount": data.get("commission_rate", {}).get("seller_commission", "₫0"),
-                "shopee_amount": data.get("commission_rate", {}).get("shopee_commission", "₫0"),
-                "default_amount": data.get("commission_rate", {}).get("default_commission", "₫0"),
-                "commission_cap": format_money(data.get("commission_rate_detail", {}).get("commission_cap", 0))
+                "seller_amount": format_money(comm_val.get("seller_commission", 0)),
+                "shopee_amount": format_money(comm_val.get("shopee_commission", 0)),
+                "default_amount": format_money(comm_val.get("default_commission", 0)),
+                "commission_cap": format_money(comm_rate.get("commission_cap", 0))
             },
             "stock": product.get("stock", 0),
             "sold": product.get("historical_sold_text", "0"),
@@ -184,9 +213,11 @@ def product_info():
         }
         return jsonify(result)
 
+    except requests.exceptions.RequestException as e:
+        return jsonify({"success": False, "error": f"Lỗi kết nối đến Shopee: {str(e)}"}), 504
     except Exception as e:
-        logger.error(f"Product info error: {e}\n{traceback.format_exc()}")
-        return jsonify({"error": "Failed to fetch product info", "detail": str(e)}), 500
+        logger.error(f"Product info unhandled error: {e}")
+        return jsonify({"success": False, "error": f"Lỗi server nội bộ: {str(e)}"}), 500
 
 # ==================== 3. API ORDERS REPORT ====================
 @app.route("/api/orders", methods=["GET"])
