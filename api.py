@@ -22,7 +22,7 @@ PORT = int(os.environ.get("PORT", 5000))
 API_KEY = os.environ.get("API_KEY", "salevn_2026_secret_key_v2")
 
 # 🌐 CẤU HÌNH PROXY SOCKS5 (Mặc định lấy từ IP bạn cung cấp, có thể override bằng Env Var trên Render)
-PROXY_URL = os.environ.get("PROXY_URL", "socks5h://115.74.200.4:1080")
+PROXY_URL = os.environ.get("PROXY_URL", "socks5h://171.253.95.3")
 proxies = {"http": PROXY_URL, "https": PROXY_URL}
 
 # 🛡️ KHỞI TẠO SESSION: Giả lập Chrome 120 + Đi qua Proxy
